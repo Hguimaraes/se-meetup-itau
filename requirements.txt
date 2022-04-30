@@ -1,0 +1,8 @@
+
+pandas
+numpy
+matplotlib
+librosa
+torch
+torchaudio
+speechbrain
