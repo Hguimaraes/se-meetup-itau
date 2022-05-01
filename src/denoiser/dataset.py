@@ -13,13 +13,15 @@ from pathlib import Path
 from speechbrain.utils.data_utils import get_all_files
 
 
-def read_audio(wav_files, is_test:bool=False):
+def read_audio(wav_files):
     # Read the waveform
     predictor = sb.dataio.dataio.read_audio(wav_files['predictors'])
-    target = sb.dataio.dataio.read_audio(wav_files['wave_target'])
+    predictor = torch.unsqueeze(predictor, 0)
+    predictor = predictor.transpose(0, 1)
 
-    # target = torch.unsqueeze(target, 0)
-    # target = target.transpose(0, 1)
+    target = sb.dataio.dataio.read_audio(wav_files['wave_target'])
+    target = torch.unsqueeze(target, 0)
+    target = target.transpose(0, 1)
 
     return predictor, target
 
@@ -128,7 +130,7 @@ def create_json(
         json_dict[utt_id] = {
             "wav_files": {
                 "predictors": {
-                    "files": noisy_utt,
+                    "file": noisy_utt,
                     "start": 0,
                     "stop": audio_len
                 },

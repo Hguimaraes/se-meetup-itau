@@ -1,0 +1,129 @@
+
+import json
+import torch
+import jiwer
+import logging
+import librosa
+import warnings
+import numpy as np
+from glob import glob
+from pesq import pesq
+from tqdm import tqdm
+from pystoi import stoi
+
+import transformers
+from transformers import Wav2Vec2ForMaskedLM
+from transformers import Wav2Vec2Tokenizer
+
+from denoiser.utils import CompositeEval
+
+
+SR = 16000 # sample_rate
+ENHANCED_FOLDER = "../dataset/se_itau_dev/"
+CLEANED_FOLDER = "../dataset/se_itau_dev/"
+
+warnings.filterwarnings("ignore", category=FutureWarning)
+transformers.logging.set_verbosity_error()
+wer_tokenizer = Wav2Vec2Tokenizer.from_pretrained("facebook/wav2vec2-base-960h")
+wer_model = Wav2Vec2ForMaskedLM.from_pretrained("facebook/wav2vec2-base-960h")
+
+def main(enhanced_folder, clean_folder):
+    enhanced_signals = sorted(list(glob(enhanced_folder + "*_noisy.wav")))
+    reference_signals = sorted(list(glob(clean_folder + "*_clean.wav")))
+
+    se_metrics = {
+        'stoi': {}, 'wer': {}, 'M': {}, 'csig': {}, 
+        'cbak': {}, 'covl': {}, 'pesq': {}, 'ssnr': {}
+    }
+    
+    for idx, path_ref in enumerate(tqdm(reference_signals)):
+        # Get path from the other list
+        path_enh = enhanced_signals[idx]
+
+        # Get signal name and remove file extension
+        fname_ref = path_ref.split("/").pop()[:-10]
+        fname_enh = path_enh.split("/").pop()[:-10]
+
+        assert fname_ref == fname_enh
+
+        ref_signal, sr = librosa.load(path_ref, sr=None, mono=True)
+        enh_signal, sr = librosa.load(path_enh, sr=None, mono=True)
+
+        # Composite metrics
+        pesq_score = pesq_eval(ref_signal, enh_signal, SR, "wb")
+        se_metrics['pesq'][fname_ref] = pesq_score
+
+        [csig, cbak, covl, ssnr] = CompositeEval(pesq_score, ref_signal, enh_signal)
+        se_metrics['csig'][fname_ref] = csig
+        se_metrics['cbak'][fname_ref] = cbak
+        se_metrics['covl'][fname_ref] = covl
+        se_metrics['ssnr'][fname_ref] = ssnr
+
+        # L3DAS22 metrics
+        [_stoi, _wer, m] = l3das22_metric(ref_signal, enh_signal, SR)
+        se_metrics['stoi'][fname_ref] = _stoi
+        se_metrics['wer'][fname_ref] = _wer
+        se_metrics['M'][fname_ref] = m
+
+    print("STOI = {:.2f}".format(np.nanmean(list(se_metrics['stoi'].values()))))
+    print("WER  = {:.2f}".format(np.nanmean(list(se_metrics['wer'].values()))))
+    print("M    = {:.2f}".format(np.nanmean(list(se_metrics['M'].values()))))
+    print("PESQ = {:.2f}".format(np.nanmean(list(se_metrics['pesq'].values()))))
+    print("CSIG = {:.2f}".format(np.nanmean(list(se_metrics['csig'].values()))))
+    print("CBAK = {:.2f}".format(np.nanmean(list(se_metrics['cbak'].values()))))
+    print("COVL = {:.2f}".format(np.nanmean(list(se_metrics['covl'].values()))))
+    print("SSNR = {:.2f}".format(np.nanmean(list(se_metrics['ssnr'].values()))))
+
+    with open("se_metrics.json", 'w') as f:
+        json.dump(se_metrics, f)
+
+
+def pesq_eval(ref_signal, pred_signal, sample_rate, mode="wb"):
+    return pesq(
+        fs=sample_rate,
+        ref=ref_signal,
+        deg=pred_signal,
+        mode=mode,
+    )
+
+def wer(clean_speech, denoised_speech):
+    """
+    computes the word error rate(WER) score for 1 single data point
+    """
+    def _transcription(clean_speech, denoised_speech):
+
+        # transcribe clean audio
+        input_values = wer_tokenizer(clean_speech, return_tensors="pt").input_values;
+        logits = wer_model(input_values).logits;
+        predicted_ids = torch.argmax(logits, dim=-1);
+        transcript_clean = wer_tokenizer.batch_decode(predicted_ids)[0];
+
+        # transcribe
+        input_values = wer_tokenizer(denoised_speech, return_tensors="pt").input_values;
+        logits = wer_model(input_values).logits;
+        predicted_ids = torch.argmax(logits, dim=-1);
+        transcript_estimate = wer_tokenizer.batch_decode(predicted_ids)[0];
+
+        return [transcript_clean, transcript_estimate]
+
+    transcript = _transcription(clean_speech, denoised_speech);
+    try:
+        wer_val = jiwer.wer(*transcript)
+    except ValueError:
+        wer_val = np.NAN
+
+    return wer_val
+
+def l3das22_metric(clean_speech, denoised_speech, sample_rate):
+    _wer = wer(clean_speech, denoised_speech)
+    _stoi = stoi(clean_speech, denoised_speech, sample_rate, extended=False)
+
+    m = np.NAN
+    if np.isfinite(_wer):
+        m = .5*(_stoi + (1 - _wer))
+    
+    return [_stoi, _wer, m]
+
+
+if __name__ == "__main__":
+    main(ENHANCED_FOLDER, CLEANED_FOLDER)
