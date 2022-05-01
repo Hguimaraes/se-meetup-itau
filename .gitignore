@@ -131,3 +131,4 @@ dmypy.json
 # Personal files
 dataset/
 logs/
+pretrained/
